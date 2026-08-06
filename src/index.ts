@@ -56,10 +56,57 @@ registerResources(server);
 // Map to store active SSE transports per session
 const transports = new Map<string, SSEServerTransport>();
 
+// MCP Manifest payload for Gemini Spark / Custom Connected App link validators
+const getMcpManifest = (req: Request) => {
+  const host = req.get('host') || 'cultivaria-mcp-server.onrender.com';
+  const protocol = req.get('x-forwarded-proto') || req.protocol || 'https';
+  const baseUrl = `${protocol}://${host}`;
+
+  return {
+    schema_version: 'v1',
+    name_for_human: 'CultivarIA MCP Server',
+    name_for_model: 'cultivaria',
+    description_for_human: 'Plataforma de automatización agronómica y control agéntico para cultivo indoor e hidropónico.',
+    description_for_model: 'Servidor MCP para consultar telemetría en tiempo real y ejecutar acciones de control sobre salas de cultivo CultivarIA.',
+    auth: {
+      type: 'none',
+    },
+    api: {
+      type: 'sse',
+      url: `${baseUrl}/sse`,
+      has_user_authentication: false,
+    },
+    mcpServers: {
+      cultivaria: {
+        url: `${baseUrl}/sse`,
+      },
+    },
+    tools: [
+      { name: 'get_live_telemetry', description: 'Obtiene los datos en tiempo real de los sensores' },
+      { name: 'get_historical_telemetry', description: 'Consulta el historial de mediciones' },
+      { name: 'get_phenological_status', description: 'Consulta el estado fenológico actual y captura ESP32' },
+      { name: 'update_setpoint', description: 'Modifica el valor objetivo de variables de cultivo' },
+      { name: 'trigger_irrigation', description: 'Controla la electroválvula de riego' },
+      { name: 'set_actuator_mode', description: 'Ajusta modos de extractores y ventiladores' },
+      { name: 'set_climate_remote_power', description: 'Control de encendido/apagado y temperatura del aire acondicionado' },
+      { name: 'set_climate_remote_swing', description: 'Control de oscilación de aletas del aire acondicionado' },
+      { name: 'update_strategy', description: 'Cambia la variedad y semana del ciclo de cultivo' },
+    ],
+  };
+};
+
 // HEAD request handler for link checkers
 app.head('*', (req: Request, res: Response) => {
   res.status(200).end();
 });
+
+// Well-known MCP Manifest Endpoints for Google Gemini Spark Link Discovery
+app.get(
+  ['/.well-known/mcp.json', '/.well-known/mcp', '/mcp.json', '/manifest.json'],
+  (req: Request, res: Response) => {
+    res.json(getMcpManifest(req));
+  }
+);
 
 // Health check endpoint
 app.get('/health', (req: Request, res: Response) => {
@@ -71,10 +118,18 @@ app.get('/health', (req: Request, res: Response) => {
   });
 });
 
-// SSE Connection Endpoint - Supports '/', '/sse', '/mcp', '/api/mcp'
+// Smart Root / SSE Connection Endpoint
 app.get(['/', '/sse', '/mcp', '/api/mcp'], authenticateBearer, async (req: Request, res: Response) => {
+  const acceptHeader = req.headers.accept || '';
+
+  // If request comes from an HTTP validator / browser expecting JSON (and not requesting SSE event-stream)
+  if (req.path === '/' && !acceptHeader.includes('text/event-stream')) {
+    res.json(getMcpManifest(req));
+    return;
+  }
+
   console.log(`[MCP SSE] Cliente (${req.ip}) conectado iniciando SSE stream en ${req.path}...`);
-  
+
   const host = req.get('host') || 'cultivaria-mcp-server.onrender.com';
   const protocol = req.get('x-forwarded-proto') || req.protocol || 'https';
   const messageEndpoint = `${protocol}://${host}/messages`;
@@ -136,42 +191,15 @@ app.post(['/', '/sse', '/mcp', '/api/mcp', '/messages'], authenticateBearer, asy
         id: id || 1,
         result: {
           tools: [
-            {
-              name: 'get_live_telemetry',
-              description: 'Obtiene los datos en tiempo real de los sensores para un módulo de cultivo (ej. EC, Temp Agua, Temp Aire, Humedad, VPD, CO2, Nivel de Agua).',
-            },
-            {
-              name: 'get_historical_telemetry',
-              description: 'Consulta el historial de mediciones para análisis de tendencias de una métrica agronómica en un rango temporal.',
-            },
-            {
-              name: 'get_phenological_status',
-              description: 'Consulta el estado fenológico actual, índice de salud foliar, última captura del ESP32-Cam y el diagnóstico agronómico IA reciente.',
-            },
-            {
-              name: 'update_setpoint',
-              description: 'Modifica el valor objetivo (target setpoint) de una variable de cultivo en la sala e incrementa el control agéntico.',
-            },
-            {
-              name: 'trigger_irrigation',
-              description: 'Controla la electroválvula de la Isla de Riego (ESP-01) para iniciar o detener el riego con temporizador.',
-            },
-            {
-              name: 'set_actuator_mode',
-              description: 'Ajusta los modos de operación (OFF, ON, AUTO, AUTO_CYCLE) de extractores y ventiladores de recirculación.',
-            },
-            {
-              name: 'set_climate_remote_power',
-              description: 'Controla el encendido/apagado, temperatura objetivo y modo operativo del aire acondicionado (Módulo Aire Nex / IR).',
-            },
-            {
-              name: 'set_climate_remote_swing',
-              description: 'Controla la oscilación de aletas (swing vertical y horizontal) del aire acondicionado.',
-            },
-            {
-              name: 'update_strategy',
-              description: 'Cambia la variedad/genética o la semana del ciclo de cultivo activa para un módulo.',
-            },
+            { name: 'get_live_telemetry', description: 'Obtiene los datos en tiempo real de los sensores' },
+            { name: 'get_historical_telemetry', description: 'Consulta el historial de mediciones' },
+            { name: 'get_phenological_status', description: 'Consulta el estado fenológico actual y captura ESP32' },
+            { name: 'update_setpoint', description: 'Modifica el valor objetivo de variables de cultivo' },
+            { name: 'trigger_irrigation', description: 'Controla la electroválvula de riego' },
+            { name: 'set_actuator_mode', description: 'Ajusta modos de extractores y ventiladores' },
+            { name: 'set_climate_remote_power', description: 'Control de encendido/apagado y temperatura del aire acondicionado' },
+            { name: 'set_climate_remote_swing', description: 'Control de oscilación de aletas del aire acondicionado' },
+            { name: 'update_strategy', description: 'Cambia la variedad y semana del ciclo de cultivo' },
           ],
         },
       });
@@ -202,11 +230,7 @@ app.post(['/', '/sse', '/mcp', '/api/mcp', '/messages'], authenticateBearer, asy
   }
 
   // Fallback response for empty POST or generic pings
-  res.status(200).json({
-    status: 'ONLINE',
-    server: 'CultivarIA MCP Server',
-    sseEndpoint: '/sse',
-  });
+  res.status(200).json(getMcpManifest(req));
 });
 
 // Start Express Listener
