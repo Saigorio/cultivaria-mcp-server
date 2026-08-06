@@ -61,12 +61,12 @@ const getMcpManifest = (req) => {
         },
         api: {
             type: 'sse',
-            url: `${baseUrl}/sse`,
+            url: `${baseUrl}/mcp`,
             has_user_authentication: false,
         },
         mcpServers: {
             cultivaria: {
-                url: `${baseUrl}/sse`,
+                url: `${baseUrl}/mcp`,
             },
         },
         tools: [
@@ -99,11 +99,11 @@ app.get('/health', (req, res) => {
         timestamp: new Date().toISOString(),
     });
 });
-// Smart Root / SSE Connection Endpoint
+// Universal MCP Endpoint - Supports '/', '/sse', '/mcp', '/api/mcp'
 app.get(['/', '/sse', '/mcp', '/api/mcp'], authenticateBearer, async (req, res) => {
     const acceptHeader = req.headers.accept || '';
-    // If request comes from an HTTP validator / browser expecting JSON (and not requesting SSE event-stream)
-    if (req.path === '/' && !acceptHeader.includes('text/event-stream')) {
+    // Content-Negotiation: If client is not explicitly requesting text/event-stream (e.g. Gemini validator GET /mcp), return JSON manifest
+    if (!acceptHeader.includes('text/event-stream')) {
         res.json(getMcpManifest(req));
         return;
     }
@@ -206,6 +206,7 @@ app.listen(PORT, () => {
 🚀 SERVIDOR MCP CULTIVARIA INICIADO EXITOSAMENTE
 ===========================================================
 📡 Endpoint SSE:      http://localhost:${PORT}/sse
+📡 Endpoint MCP:      http://localhost:${PORT}/mcp
 📩 Endpoint Mensajes: http://localhost:${PORT}/messages
 🏥 Health Check:     http://localhost:${PORT}/health
 ===========================================================
