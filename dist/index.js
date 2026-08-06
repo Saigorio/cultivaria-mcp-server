@@ -12,24 +12,16 @@ const tools_js_1 = require("./tools.js");
 const resources_js_1 = require("./resources.js");
 dotenv_1.default.config();
 const PORT = Number(process.env.PORT) || 3001;
-const CULTIVARIA_MCP_TOKEN = process.env.CULTIVARIA_MCP_TOKEN || 'cultivaria_mcp_secret_token_2026';
 const app = (0, express_1.default)();
-// 1. CORS Middleware for Cross-Origin requests
-app.use((0, cors_1.default)({
-    origin: '*',
-    methods: ['GET', 'POST', 'OPTIONS', 'HEAD', 'PUT', 'DELETE'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'X-Requested-With'],
-}));
+// 1. Enable Full CORS for Gemini
+app.use((0, cors_1.default)({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'], allowedHeaders: ['*'] }));
+app.options('*', (0, cors_1.default)({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'], allowedHeaders: ['*'] }));
 app.use(express_1.default.json());
 // Logger middleware
 app.use((req, res, next) => {
     console.log(`[MCP HTTP] ${req.method} ${req.originalUrl} - IP: ${req.ip}`);
     next();
 });
-// Open / Public Middleware
-function authenticateBearer(req, res, next) {
-    next();
-}
 // Initialize MCP Server Instance
 const server = new index_js_1.Server({
     name: 'cultivaria-mcp-server',
@@ -61,12 +53,12 @@ const getMcpManifest = (req) => {
         },
         api: {
             type: 'sse',
-            url: `${baseUrl}/mcp`,
+            url: `${baseUrl}/sse`,
             has_user_authentication: false,
         },
         mcpServers: {
             cultivaria: {
-                url: `${baseUrl}/mcp`,
+                url: `${baseUrl}/sse`,
             },
         },
         tools: [
@@ -99,10 +91,10 @@ app.get('/health', (req, res) => {
         timestamp: new Date().toISOString(),
     });
 });
-// Universal MCP Endpoint - Supports '/', '/sse', '/mcp', '/api/mcp'
-app.get(['/', '/sse', '/mcp', '/api/mcp'], authenticateBearer, async (req, res) => {
+// GET /sse - Open Public SSE Stream for Gemini
+app.get(['/', '/sse', '/mcp', '/api/mcp'], async (req, res) => {
     const acceptHeader = req.headers.accept || '';
-    // Content-Negotiation: If client is not explicitly requesting text/event-stream (e.g. Gemini validator GET /mcp), return JSON manifest
+    // If client is not explicitly requesting text/event-stream, return JSON manifest
     if (!acceptHeader.includes('text/event-stream')) {
         res.json(getMcpManifest(req));
         return;
@@ -119,8 +111,8 @@ app.get(['/', '/sse', '/mcp', '/api/mcp'], authenticateBearer, async (req, res) 
     });
     await server.connect(transport);
 });
-// Dual HTTP POST / JSON-RPC Handler for direct MCP clients
-app.post(['/', '/sse', '/mcp', '/api/mcp', '/messages'], authenticateBearer, async (req, res) => {
+// POST /messages - Open Public Message Post Handler for Gemini
+app.post(['/', '/sse', '/mcp', '/api/mcp', '/messages'], async (req, res) => {
     const sessionId = req.query.sessionId;
     // Handle SSE Post Messages if sessionId exists
     if (sessionId && transports.has(sessionId)) {
@@ -203,7 +195,7 @@ app.post(['/', '/sse', '/mcp', '/api/mcp', '/messages'], authenticateBearer, asy
 app.listen(PORT, () => {
     console.log(`
 ===========================================================
-🚀 SERVIDOR MCP CULTIVARIA INICIADO EXITOSAMENTE
+🚀 SERVIDOR MCP CULTIVARIA INICIADO EXITOSAMENTE (100% PUBLIC & OPEN CORS)
 ===========================================================
 📡 Endpoint SSE:      http://localhost:${PORT}/sse
 📡 Endpoint MCP:      http://localhost:${PORT}/mcp
