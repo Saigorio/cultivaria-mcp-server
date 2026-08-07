@@ -7,38 +7,31 @@ const express_1 = __importDefault(require("express"));
 const cors_1 = __importDefault(require("cors"));
 const dotenv_1 = __importDefault(require("dotenv"));
 const index_js_1 = require("@modelcontextprotocol/sdk/server/index.js");
-const sse_js_1 = require("@modelcontextprotocol/sdk/server/sse.js");
+const streamableHttp_js_1 = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
 const tools_js_1 = require("./tools.js");
 const resources_js_1 = require("./resources.js");
 dotenv_1.default.config();
 const PORT = Number(process.env.PORT) || 3001;
 const app = (0, express_1.default)();
-// 1. Enable Full CORS — 100% Open for Gemini Spark
+// 1. Full CORS — 100% Open for Gemini Spark
 app.use((0, cors_1.default)({
     origin: '*',
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Accept', 'Cache-Control', 'Connection', 'X-Requested-With'],
-    credentials: false,
-}));
-app.options('*', (0, cors_1.default)({
-    origin: '*',
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Accept', 'Cache-Control', 'Connection', 'X-Requested-With'],
+    methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Accept', 'mcp-session-id', 'Last-Event-ID'],
+    exposedHeaders: ['mcp-session-id'],
     credentials: false,
 }));
 app.use(express_1.default.json());
 // Logger middleware
 app.use((req, res, next) => {
-    console.log(`[MCP HTTP] ${req.method} ${req.originalUrl} - IP: ${req.ip} - Accept: ${req.headers.accept || 'none'}`);
+    console.log(`[MCP HTTP] ${req.method} ${req.originalUrl} - IP: ${req.ip} - Session: ${req.headers['mcp-session-id'] || 'none'}`);
     next();
 });
-// Map to store active SSE transports per session
-const transports = new Map();
+const sessions = new Map();
 /**
- * Creates a fresh MCP Server instance with tools & resources registered.
- * Each SSE session gets its own Server to avoid SDK state conflicts.
+ * Creates a fresh MCP Server + StreamableHTTP Transport pair for a new session.
  */
-function createMcpServer() {
+function createSession() {
     const server = new index_js_1.Server({
         name: 'cultivaria-mcp-server',
         version: '1.0.0',
@@ -50,190 +43,106 @@ function createMcpServer() {
     });
     (0, tools_js_1.registerTools)(server);
     (0, resources_js_1.registerResources)(server);
-    return server;
+    const transport = new streamableHttp_js_1.StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined, // Let SDK generate session IDs
+    });
+    return { server, transport };
 }
-// MCP Manifest payload for Gemini Spark / Custom Connected App link validators
-const getMcpManifest = (req) => {
-    const host = req.get('host') || 'cultivaria-mcp-server.onrender.com';
-    const protocol = req.get('x-forwarded-proto') || req.protocol || 'https';
-    const baseUrl = `${protocol}://${host}`;
-    return {
-        schema_version: 'v1',
-        name_for_human: 'CultivarIA MCP Server',
-        name_for_model: 'cultivaria',
-        description_for_human: 'Plataforma de automatización agronómica y control agéntico para cultivo indoor e hidropónico.',
-        description_for_model: 'Servidor MCP para consultar telemetría en tiempo real y ejecutar acciones de control sobre salas de cultivo CultivarIA.',
-        auth: {
-            type: 'none',
-        },
-        api: {
-            type: 'sse',
-            url: `${baseUrl}/sse`,
-            has_user_authentication: false,
-        },
-        mcpServers: {
-            cultivaria: {
-                url: `${baseUrl}/sse`,
-            },
-        },
-        tools: [
-            { name: 'get_live_telemetry', description: 'Obtiene los datos en tiempo real de los sensores' },
-            { name: 'get_historical_telemetry', description: 'Consulta el historial de mediciones' },
-            { name: 'get_phenological_status', description: 'Consulta el estado fenológico actual y captura ESP32' },
-            { name: 'update_setpoint', description: 'Modifica el valor objetivo de variables de cultivo' },
-            { name: 'trigger_irrigation', description: 'Controla la electroválvula de riego' },
-            { name: 'set_actuator_mode', description: 'Ajusta modos de extractores y ventiladores' },
-            { name: 'set_climate_remote_power', description: 'Control de encendido/apagado y temperatura del aire acondicionado' },
-            { name: 'set_climate_remote_swing', description: 'Control de oscilación de aletas del aire acondicionado' },
-            { name: 'update_strategy', description: 'Cambia la variedad y semana del ciclo de cultivo' },
-        ],
-    };
-};
-// HEAD request handler for link checkers
-app.head('*', (req, res) => {
-    res.status(200).end();
-});
-// Well-known MCP Manifest Endpoints for Google Gemini Spark Link Discovery
-app.get(['/.well-known/mcp.json', '/.well-known/mcp', '/mcp.json', '/manifest.json'], (req, res) => {
-    res.json(getMcpManifest(req));
-});
-// Health check endpoint
+// ── Health Check ───────────────────────────────────────────────────
 app.get('/health', (req, res) => {
     res.json({
         status: 'ONLINE',
         server: 'CultivarIA MCP Server',
         version: '1.0.0',
+        transport: 'streamable-http',
+        activeSessions: sessions.size,
         timestamp: new Date().toISOString(),
     });
 });
-// GET /sse — ALWAYS initiate SSE stream (no Accept header gating)
-// Gemini Spark validators may not send Accept: text/event-stream
-app.get('/sse', async (req, res) => {
-    console.log(`[MCP SSE] Cliente (${req.ip}) conectado, iniciando SSE stream...`);
-    const host = req.get('host') || 'cultivaria-mcp-server.onrender.com';
-    const protocol = req.get('x-forwarded-proto') || req.protocol || 'https';
-    const messageEndpoint = `${protocol}://${host}/messages`;
-    const transport = new sse_js_1.SSEServerTransport(messageEndpoint, res);
-    transports.set(transport.sessionId, transport);
-    req.on('close', () => {
-        console.log(`[MCP SSE] Sesión cerrada: ${transport.sessionId}`);
-        transports.delete(transport.sessionId);
-    });
-    const mcpServer = createMcpServer();
-    await mcpServer.connect(transport);
-});
-// Root and alias paths — serve manifest as JSON (not SSE)
-app.get(['/', '/mcp', '/api/mcp'], (req, res) => {
-    res.json(getMcpManifest(req));
-});
-// POST /messages — handle MCP JSON-RPC messages via SSE transport
-app.post('/messages', async (req, res) => {
-    const sessionId = req.query.sessionId;
-    if (sessionId && transports.has(sessionId)) {
-        const transport = transports.get(sessionId);
-        await transport.handlePostMessage(req, res);
+// ── MCP Streamable HTTP Endpoint: POST /mcp ────────────────────────
+// Handles all JSON-RPC requests from MCP clients
+app.post('/mcp', async (req, res) => {
+    const sessionId = req.headers['mcp-session-id'];
+    // Check if this is an initialization request (no session yet)
+    const isInitialize = req.body?.method === 'initialize';
+    if (isInitialize || !sessionId) {
+        // New session: create server + transport, connect, and handle
+        const session = createSession();
+        await session.server.connect(session.transport);
+        // handleRequest will generate a session ID and set it in the response header
+        await session.transport.handleRequest(req, res, req.body);
+        // Extract the session ID from the response header to store in our map
+        const newSessionId = res.getHeader('mcp-session-id');
+        if (newSessionId) {
+            sessions.set(newSessionId, session);
+            console.log(`[MCP] New session created: ${newSessionId}`);
+            // Clean up when transport closes
+            session.transport.onclose = () => {
+                sessions.delete(newSessionId);
+                console.log(`[MCP] Session closed: ${newSessionId}`);
+            };
+        }
         return;
     }
-    // No valid session — return error
-    res.status(400).json({
-        jsonrpc: '2.0',
-        error: {
-            code: -32000,
-            message: `No active SSE session found for sessionId: ${sessionId || '(none)'}. Connect to /sse first.`,
-        },
-        id: null,
-    });
-});
-// POST to other paths — handle direct JSON-RPC for clients without SSE
-app.post(['/', '/sse', '/mcp', '/api/mcp'], async (req, res) => {
-    const sessionId = req.query.sessionId;
-    // If it has a sessionId, route to transport
-    if (sessionId && transports.has(sessionId)) {
-        const transport = transports.get(sessionId);
-        await transport.handlePostMessage(req, res);
+    // Existing session: route to the correct transport
+    const session = sessions.get(sessionId);
+    if (!session) {
+        res.status(404).json({
+            jsonrpc: '2.0',
+            error: {
+                code: -32000,
+                message: `Session not found: ${sessionId}. Send an 'initialize' request first.`,
+            },
+            id: null,
+        });
         return;
     }
-    // Handle direct JSON-RPC Requests (for clients querying without SSE session)
-    const body = req.body;
-    if (body && typeof body === 'object' && body.jsonrpc === '2.0') {
-        const { id, method } = body;
-        if (method === 'initialize') {
-            res.json({
-                jsonrpc: '2.0',
-                id: id || 1,
-                result: {
-                    protocolVersion: '2024-11-05',
-                    capabilities: {
-                        tools: {},
-                        resources: {},
-                    },
-                    serverInfo: {
-                        name: 'cultivaria-mcp-server',
-                        version: '1.0.0',
-                    },
-                },
-            });
-            return;
-        }
-        if (method === 'notifications/initialized') {
-            res.status(200).end();
-            return;
-        }
-        if (method === 'tools/list') {
-            res.json({
-                jsonrpc: '2.0',
-                id: id || 1,
-                result: {
-                    tools: [
-                        { name: 'get_live_telemetry', description: 'Obtiene los datos en tiempo real de los sensores' },
-                        { name: 'get_historical_telemetry', description: 'Consulta el historial de mediciones' },
-                        { name: 'get_phenological_status', description: 'Consulta el estado fenológico actual y captura ESP32' },
-                        { name: 'update_setpoint', description: 'Modifica el valor objetivo de variables de cultivo' },
-                        { name: 'trigger_irrigation', description: 'Controla la electroválvula de riego' },
-                        { name: 'set_actuator_mode', description: 'Ajusta modos de extractores y ventiladores' },
-                        { name: 'set_climate_remote_power', description: 'Control de encendido/apagado y temperatura del aire acondicionado' },
-                        { name: 'set_climate_remote_swing', description: 'Control de oscilación de aletas del aire acondicionado' },
-                        { name: 'update_strategy', description: 'Cambia la variedad y semana del ciclo de cultivo' },
-                    ],
-                },
-            });
-            return;
-        }
-        if (method === 'resources/list') {
-            res.json({
-                jsonrpc: '2.0',
-                id: id || 1,
-                result: {
-                    resources: [
-                        {
-                            uri: 'cultivaria://system_status',
-                            name: 'Resumen de Estado del Sistema CultivarIA',
-                            mimeType: 'application/json',
-                        },
-                        {
-                            uri: 'cultivaria://modules',
-                            name: 'Módulos de Cultivo Registrados',
-                            mimeType: 'application/json',
-                        },
-                    ],
-                },
-            });
-            return;
-        }
-    }
-    // Fallback response for empty POST or generic pings
-    res.status(200).json(getMcpManifest(req));
+    await session.transport.handleRequest(req, res, req.body);
 });
-// Start Express Listener
+// ── MCP Streamable HTTP Endpoint: GET /mcp ─────────────────────────
+// Server-Sent Events stream for server-to-client notifications
+app.get('/mcp', async (req, res) => {
+    const sessionId = req.headers['mcp-session-id'];
+    if (!sessionId || !sessions.has(sessionId)) {
+        res.status(400).json({
+            jsonrpc: '2.0',
+            error: {
+                code: -32000,
+                message: 'Missing or invalid mcp-session-id header. Initialize a session first via POST /mcp.',
+            },
+            id: null,
+        });
+        return;
+    }
+    const session = sessions.get(sessionId);
+    await session.transport.handleRequest(req, res);
+});
+// ── MCP Streamable HTTP Endpoint: DELETE /mcp ──────────────────────
+// Session termination
+app.delete('/mcp', async (req, res) => {
+    const sessionId = req.headers['mcp-session-id'];
+    if (!sessionId || !sessions.has(sessionId)) {
+        res.status(404).json({ error: 'Session not found' });
+        return;
+    }
+    const session = sessions.get(sessionId);
+    await session.transport.handleRequest(req, res);
+    sessions.delete(sessionId);
+    console.log(`[MCP] Session terminated by client: ${sessionId}`);
+});
+// ── HEAD handler for link checkers ─────────────────────────────────
+app.head('*', (req, res) => {
+    res.status(200).end();
+});
+// ── Start Express Listener ─────────────────────────────────────────
 app.listen(PORT, () => {
     console.log(`
 ===========================================================
-🚀 SERVIDOR MCP CULTIVARIA INICIADO (100% PUBLIC & OPEN CORS)
+🚀 SERVIDOR MCP CULTIVARIA (Streamable HTTP Transport)
 ===========================================================
-📡 Endpoint SSE:      http://localhost:${PORT}/sse
-📩 Endpoint Mensajes: http://localhost:${PORT}/messages
-📋 Manifest:         http://localhost:${PORT}/.well-known/mcp.json
+📡 MCP Endpoint:     http://localhost:${PORT}/mcp
 🏥 Health Check:     http://localhost:${PORT}/health
+🔓 Auth:             NONE (100% Public & Open CORS)
 ===========================================================
 `);
 });
