@@ -12,38 +12,52 @@ const PORT = Number(process.env.PORT) || 3001;
 
 const app = express();
 
-// 1. Enable Full CORS for Gemini
-app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'], allowedHeaders: ['*'] }));
-app.options('*', cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'], allowedHeaders: ['*'] }));
+// 1. Enable Full CORS — 100% Open for Gemini Spark
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Accept', 'Cache-Control', 'Connection', 'X-Requested-With'],
+  credentials: false,
+}));
+app.options('*', cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Accept', 'Cache-Control', 'Connection', 'X-Requested-With'],
+  credentials: false,
+}));
 
 app.use(express.json());
 
 // Logger middleware
 app.use((req: Request, res: Response, next: NextFunction) => {
-  console.log(`[MCP HTTP] ${req.method} ${req.originalUrl} - IP: ${req.ip}`);
+  console.log(`[MCP HTTP] ${req.method} ${req.originalUrl} - IP: ${req.ip} - Accept: ${req.headers.accept || 'none'}`);
   next();
 });
 
-// Initialize MCP Server Instance
-const server = new Server(
-  {
-    name: 'cultivaria-mcp-server',
-    version: '1.0.0',
-  },
-  {
-    capabilities: {
-      tools: {},
-      resources: {},
-    },
-  }
-);
-
-// Register Tools & Resources
-registerTools(server);
-registerResources(server);
-
 // Map to store active SSE transports per session
 const transports = new Map<string, SSEServerTransport>();
+
+/**
+ * Creates a fresh MCP Server instance with tools & resources registered.
+ * Each SSE session gets its own Server to avoid SDK state conflicts.
+ */
+function createMcpServer(): Server {
+  const server = new Server(
+    {
+      name: 'cultivaria-mcp-server',
+      version: '1.0.0',
+    },
+    {
+      capabilities: {
+        tools: {},
+        resources: {},
+      },
+    }
+  );
+  registerTools(server);
+  registerResources(server);
+  return server;
+}
 
 // MCP Manifest payload for Gemini Spark / Custom Connected App link validators
 const getMcpManifest = (req: Request) => {
@@ -107,17 +121,10 @@ app.get('/health', (req: Request, res: Response) => {
   });
 });
 
-// GET /sse - Open Public SSE Stream for Gemini
-app.get(['/', '/sse', '/mcp', '/api/mcp'], async (req: Request, res: Response) => {
-  const acceptHeader = req.headers.accept || '';
-
-  // If client is not explicitly requesting text/event-stream, return JSON manifest
-  if (!acceptHeader.includes('text/event-stream')) {
-    res.json(getMcpManifest(req));
-    return;
-  }
-
-  console.log(`[MCP SSE] Cliente (${req.ip}) conectado iniciando SSE stream en ${req.path}...`);
+// GET /sse — ALWAYS initiate SSE stream (no Accept header gating)
+// Gemini Spark validators may not send Accept: text/event-stream
+app.get('/sse', async (req: Request, res: Response) => {
+  console.log(`[MCP SSE] Cliente (${req.ip}) conectado, iniciando SSE stream...`);
 
   const host = req.get('host') || 'cultivaria-mcp-server.onrender.com';
   const protocol = req.get('x-forwarded-proto') || req.protocol || 'https';
@@ -131,14 +138,41 @@ app.get(['/', '/sse', '/mcp', '/api/mcp'], async (req: Request, res: Response) =
     transports.delete(transport.sessionId);
   });
 
-  await server.connect(transport);
+  const mcpServer = createMcpServer();
+  await mcpServer.connect(transport);
 });
 
-// POST /messages - Open Public Message Post Handler for Gemini
-app.post(['/', '/sse', '/mcp', '/api/mcp', '/messages'], async (req: Request, res: Response) => {
+// Root and alias paths — serve manifest as JSON (not SSE)
+app.get(['/', '/mcp', '/api/mcp'], (req: Request, res: Response) => {
+  res.json(getMcpManifest(req));
+});
+
+// POST /messages — handle MCP JSON-RPC messages via SSE transport
+app.post('/messages', async (req: Request, res: Response) => {
   const sessionId = req.query.sessionId as string;
 
-  // Handle SSE Post Messages if sessionId exists
+  if (sessionId && transports.has(sessionId)) {
+    const transport = transports.get(sessionId);
+    await transport!.handlePostMessage(req, res);
+    return;
+  }
+
+  // No valid session — return error
+  res.status(400).json({
+    jsonrpc: '2.0',
+    error: {
+      code: -32000,
+      message: `No active SSE session found for sessionId: ${sessionId || '(none)'}. Connect to /sse first.`,
+    },
+    id: null,
+  });
+});
+
+// POST to other paths — handle direct JSON-RPC for clients without SSE
+app.post(['/', '/sse', '/mcp', '/api/mcp'], async (req: Request, res: Response) => {
+  const sessionId = req.query.sessionId as string;
+
+  // If it has a sessionId, route to transport
   if (sessionId && transports.has(sessionId)) {
     const transport = transports.get(sessionId);
     await transport!.handlePostMessage(req, res);
@@ -226,11 +260,11 @@ app.post(['/', '/sse', '/mcp', '/api/mcp', '/messages'], async (req: Request, re
 app.listen(PORT, () => {
   console.log(`
 ===========================================================
-🚀 SERVIDOR MCP CULTIVARIA INICIADO EXITOSAMENTE (100% PUBLIC & OPEN CORS)
+🚀 SERVIDOR MCP CULTIVARIA INICIADO (100% PUBLIC & OPEN CORS)
 ===========================================================
 📡 Endpoint SSE:      http://localhost:${PORT}/sse
-📡 Endpoint MCP:      http://localhost:${PORT}/mcp
 📩 Endpoint Mensajes: http://localhost:${PORT}/messages
+📋 Manifest:         http://localhost:${PORT}/.well-known/mcp.json
 🏥 Health Check:     http://localhost:${PORT}/health
 ===========================================================
 `);
