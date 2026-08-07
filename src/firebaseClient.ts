@@ -3,50 +3,88 @@ dotenv.config();
 
 const BACKEND_URL = process.env.BACKEND_URL || 'https://cultivaria-9673f-default-rtdb.firebaseio.com';
 
-// Fallback in-memory state for maximum resilience and high availability
+// Fallback in-memory state — mirrors the REAL Firebase RTDB structure
 const fallbackStore: Record<string, any> = {
   'flora-01': {
     id: 'flora-01',
     name: 'Vege Madres',
-    stage: 'Vegetativo 2 - Madres',
+    stage: 'VEGETATIVE',
+    status: 'ONLINE',
     currentReadings: {
-      ph: 5.9,
-      ec: 1.5,
-      waterTemp: 19.8,
-      airTemp: 23.5,
-      airHumidity: 58.0,
-      vpd: 1.15,
-      co2: 650,
-      waterLevel: 85,
+      ph: 5.85,
+      ec: 1.8,
+      waterTemp: 16.5,
+      airTemp: 17.8,
+      airHumidity: 74.4,
+      vpd: 0.52,
+      co2: 1180,
+      dissolvedOxygen: 7.9,
+      waterLevel: 88,
+      waterLevelOk: true,
     },
     setpoints: {
-      phTarget: 5.8,
-      ecTarget: 1.6,
-      waterTempTarget: 20.0,
-      airTempTarget: 24.0,
-      airHumidityTarget: 60.0,
-      vpdTarget: 1.1,
+      phTarget: 6,
+      phTolerance: 0.2,
+      ecTarget: 1,
+      ecTolerance: 0.2,
+      waterTempTarget: 15,
+      waterTempTolerance: 1,
+      airTempTarget: 25,
+      airHumidityTarget: 65,
+      dissolvedOxygenTarget: 8,
+      vpdTarget: 1.2,
+      waterLevelTarget: 90,
+    },
+    climate_ac: {
+      power: true,
+      temp: 24,
+      mode: 'cool',
+      fan: 'med',
+      eco: false,
+      turbo: true,
+      swingV: true,
+      swingH: false,
+      display: true,
+      updatedAt: Date.now(),
     },
     actuators: {
-      extractor_general: 'AUTO',
-      ventilador_recirculacion: 'AUTO_CYCLE',
-      iluminacion: 'ON',
-      bomba_riego: 'OFF',
+      chillerState: 'ON',
+      solenoidFillState: 'CLOSED',
+      solenoidTimerEndTime: 0,
+      phPumpState: 'IDLE',
+      ecPumpState: 'IDLE',
+      lastDoseTime: 0,
+      extractorState: 'AUTO',
+      ventilationState: 'AUTO_CYCLE',
     },
-    strategy: {
+    strategyPlan: {
+      id: 'plan-fallback',
+      kitId: 'flora-01',
       strainName: 'Gorilla Glue #4',
-      cycleWeek: 'Semana 4 - Vegetativo',
+      totalWeeks: 1,
+      activeWeekIndex: 0,
+      isActive: false,
+      steps: [
+        {
+          weekNumber: 1,
+          weekTitle: 'Semana 1 - Vegetativo',
+          stage: 'VEGETATIVE',
+          phTarget: 5.8,
+          ecTarget: 1.2,
+          waterTempTarget: 19.5,
+          airTempTarget: 24,
+          airHumidityTarget: 65,
+          vpdTarget: 1.04,
+          co2Target: 800,
+          lightIntensityPercent: 60,
+          waterRenewalDays: 7,
+          observationsNotes: 'Monitorear vigor y turgencia.',
+        },
+      ],
     },
-    phenology: {
-      healthIndex: '98% Excelente',
-      lastSnapshotUrl: 'https://cultivaria-9673f.web.app/snapshots/latest.jpg',
-      lastSnapshotTimestamp: Date.now() - 3600000,
-      lastAIDiagnosis: 'Masa foliar vigorosa con excelente desarrollo de clorofila. Sin signos de plagas o deficiencias.',
-    },
-    irrigationState: {
-      status: 'CERRADA',
-      lastDurationMinutes: 0,
-      updatedAt: Date.now(),
+    calibration: {
+      ecFactor: 1,
+      ecOffset: -0.88,
     },
   },
 };
@@ -62,16 +100,29 @@ export async function getModuleData(moduleId = 'flora-01') {
       const data = await res.json();
       if (data && typeof data === 'object') {
         // Merge with defaults to ensure all required fields exist
+        const fb = fallbackStore[moduleId] || fallbackStore['flora-01'];
         return {
-          ...fallbackStore[moduleId] || fallbackStore['flora-01'],
+          ...fb,
           ...data,
           currentReadings: {
-            ...fallbackStore['flora-01'].currentReadings,
+            ...fb.currentReadings,
             ...(data.currentReadings || {}),
           },
           setpoints: {
-            ...fallbackStore['flora-01'].setpoints,
+            ...fb.setpoints,
             ...(data.setpoints || {}),
+          },
+          climate_ac: {
+            ...fb.climate_ac,
+            ...(data.climate_ac || {}),
+          },
+          actuators: {
+            ...fb.actuators,
+            ...(data.actuators || {}),
+          },
+          strategyPlan: {
+            ...fb.strategyPlan,
+            ...(data.strategyPlan || {}),
           },
         };
       }
@@ -87,6 +138,7 @@ export async function getModuleData(moduleId = 'flora-01') {
  */
 export async function updateModuleData(path: string, patchData: Record<string, any>, moduleId = 'flora-01') {
   const url = `${BACKEND_URL}/kits/${moduleId}/${path}.json`;
+  console.log(`[FirebaseClient] PATCH ${url}`, JSON.stringify(patchData));
   try {
     const res = await fetch(url, {
       method: 'PATCH',
@@ -96,7 +148,10 @@ export async function updateModuleData(path: string, patchData: Record<string, a
 
     if (res.ok) {
       const updated = await res.json();
-      return { success: true, updated };
+      console.log(`[FirebaseClient] PATCH OK:`, JSON.stringify(updated));
+      return { success: true, updated, fallbackUsed: false };
+    } else {
+      console.warn(`[FirebaseClient] PATCH failed with status ${res.status}: ${await res.text()}`);
     }
   } catch (error) {
     console.warn(`[FirebaseClient] Error PATCH en ${path}. Aplicando en estado fallback:`, error);

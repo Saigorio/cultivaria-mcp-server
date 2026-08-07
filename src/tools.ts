@@ -3,7 +3,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { z } from 'zod';
 import { getModuleData, updateModuleData } from './firebaseClient.js';
 
-// Schemas
+// ── Schemas ────────────────────────────────────────────────────────
 const GetLiveTelemetrySchema = z.object({
   module_id: z.string().optional().default('flora-01'),
 });
@@ -19,7 +19,7 @@ const GetPhenologicalStatusSchema = z.object({
 });
 
 const UpdateSetpointSchema = z.object({
-  metric: z.enum(['ec', 'temp_agua', 'temp_aire', 'humedad_aire', 'vpd', 'ph']),
+  metric: z.enum(['ec', 'temp_agua', 'temp_aire', 'humedad_aire', 'vpd', 'ph', 'oxigeno_disuelto', 'nivel_agua']),
   target_value: z.number(),
   module_id: z.string().optional().default('flora-01'),
 });
@@ -31,7 +31,7 @@ const TriggerIrrigationSchema = z.object({
 });
 
 const SetActuatorModeSchema = z.object({
-  device: z.enum(['extractor_general', 'ventilador_recirculacion']),
+  device: z.enum(['extractor', 'ventilacion', 'chiller']),
   mode: z.enum(['OFF', 'ON', 'AUTO', 'AUTO_CYCLE']),
   on_minutes: z.number().optional(),
   off_minutes: z.number().optional(),
@@ -47,7 +47,8 @@ const UpdateStrategySchema = z.object({
 const SetClimateRemotePowerSchema = z.object({
   power: z.boolean(),
   temp: z.number().optional().default(24),
-  mode: z.enum(['cool', 'heat', 'dry', 'fan']).optional().default('cool'),
+  mode: z.enum(['cool', 'heat', 'dry', 'fan', 'auto']).optional().default('cool'),
+  fan: z.enum(['auto', 'low', 'med', 'high']).optional(),
   turbo: z.boolean().optional().default(false),
   eco: z.boolean().optional().default(false),
   module_id: z.string().optional().default('flora-01'),
@@ -59,14 +60,35 @@ const SetClimateRemoteSwingSchema = z.object({
   module_id: z.string().optional().default('flora-01'),
 });
 
+// ── Mapping helpers ────────────────────────────────────────────────
+
+/** Maps MCP metric names → Firebase RTDB setpoint keys */
+const setpointKeyMap: Record<string, string> = {
+  ec: 'ecTarget',
+  temp_agua: 'waterTempTarget',
+  temp_aire: 'airTempTarget',
+  humedad_aire: 'airHumidityTarget',
+  vpd: 'vpdTarget',
+  ph: 'phTarget',
+  oxigeno_disuelto: 'dissolvedOxygenTarget',
+  nivel_agua: 'waterLevelTarget',
+};
+
+/** Maps MCP device names → Firebase RTDB actuator keys */
+const deviceKeyMap: Record<string, string> = {
+  extractor: 'extractorState',
+  ventilacion: 'ventilationState',
+  chiller: 'chillerState',
+};
+
 export function registerTools(server: Server) {
-  // List Tools Definition
+  // ── List Tools Definition ──────────────────────────────────────
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     return {
       tools: [
         {
           name: 'get_live_telemetry',
-          description: 'Obtiene los datos en tiempo real de los sensores para un módulo de cultivo (ej. EC, Temp Agua, Temp Aire, Humedad, VPD, CO2, Nivel de Agua).',
+          description: 'Obtiene los datos en tiempo real de los sensores para un módulo de cultivo (pH, EC, Temp Agua, Temp Aire, Humedad, VPD, CO2, Oxígeno Disuelto, Nivel de Agua).',
           inputSchema: {
             type: 'object',
             properties: {
@@ -97,7 +119,7 @@ export function registerTools(server: Server) {
         },
         {
           name: 'get_phenological_status',
-          description: 'Consulta el estado fenológico actual, índice de salud foliar, última captura del ESP32-Cam y el diagnóstico agronómico IA reciente.',
+          description: 'Consulta el estado fenológico actual: etapa de cultivo, plan de estrategia activo, genética, semana activa y diagnóstico general.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -107,13 +129,13 @@ export function registerTools(server: Server) {
         },
         {
           name: 'update_setpoint',
-          description: 'Modifica el valor objetivo (target setpoint) de una variable de cultivo en la sala e incrementa el control agéntico.',
+          description: 'Modifica el valor objetivo (target setpoint) de una variable de cultivo en la sala.',
           inputSchema: {
             type: 'object',
             properties: {
               metric: {
                 type: 'string',
-                enum: ['ec', 'temp_agua', 'temp_aire', 'humedad_aire', 'vpd', 'ph'],
+                enum: ['ec', 'temp_agua', 'temp_aire', 'humedad_aire', 'vpd', 'ph', 'oxigeno_disuelto', 'nivel_agua'],
                 description: 'Métrica cuyo setpoint se desea actualizar.',
               },
               target_value: { type: 'number', description: 'Nuevo valor objetivo deseado.' },
@@ -124,7 +146,7 @@ export function registerTools(server: Server) {
         },
         {
           name: 'trigger_irrigation',
-          description: 'Controla la electroválvula de la Isla de Riego (ESP-01) para iniciar o detener el riego con temporizador.',
+          description: 'Controla la electroválvula de la Isla de Riego (ESP-01) para iniciar o detener el riego. Abre o cierra solenoidFillState en Firebase.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -137,14 +159,14 @@ export function registerTools(server: Server) {
         },
         {
           name: 'set_actuator_mode',
-          description: 'Ajusta los modos de operación (OFF, ON, AUTO, AUTO_CYCLE) de extractores y ventiladores de recirculación.',
+          description: 'Ajusta el estado de operación de extractores (extractorState), ventilación de recirculación (ventilationState) o chiller (chillerState). Modos: OFF, ON, AUTO, AUTO_CYCLE.',
           inputSchema: {
             type: 'object',
             properties: {
               device: {
                 type: 'string',
-                enum: ['extractor_general', 'ventilador_recirculacion'],
-                description: 'Equipo de climatización a ajustar.',
+                enum: ['extractor', 'ventilacion', 'chiller'],
+                description: 'Equipo a ajustar: extractor, ventilacion, o chiller.',
               },
               mode: {
                 type: 'string',
@@ -160,7 +182,7 @@ export function registerTools(server: Server) {
         },
         {
           name: 'update_strategy',
-          description: 'Cambia la variedad/genética o la semana del ciclo de cultivo activa para un módulo.',
+          description: 'Actualiza el nombre de la genética o la semana activa en el plan de estrategia de cultivo (strategyPlan).',
           inputSchema: {
             type: 'object',
             properties: {
@@ -173,13 +195,14 @@ export function registerTools(server: Server) {
         },
         {
           name: 'set_climate_remote_power',
-          description: 'Controla el encendido/apagado, temperatura objetivo y modo operativo del aire acondicionado (Módulo Aire Nex / IR).',
+          description: 'Controla el aire acondicionado NEX vía módulo IR (WeMos D1 R32). Escribe en climate_ac de Firebase que el firmware lee cada 1.5s para emitir IR.',
           inputSchema: {
             type: 'object',
             properties: {
               power: { type: 'boolean', description: 'true para encender, false para apagar el aire acondicionado.' },
-              temp: { type: 'number', description: 'Temperatura objetivo en °C (ej. 24).' },
-              mode: { type: 'string', enum: ['cool', 'heat', 'dry', 'fan'], description: 'Modo de operación del aire.' },
+              temp: { type: 'number', description: 'Temperatura objetivo en °C (16-30).' },
+              mode: { type: 'string', enum: ['cool', 'heat', 'dry', 'fan', 'auto'], description: 'Modo de operación del aire.' },
+              fan: { type: 'string', enum: ['auto', 'low', 'med', 'high'], description: 'Velocidad del ventilador.' },
               turbo: { type: 'boolean', description: 'Modo Turbo encendido/apagado.' },
               eco: { type: 'boolean', description: 'Modo Eco encendido/apagado.' },
               module_id: { type: 'string', description: 'ID del módulo de cultivo.' },
@@ -189,12 +212,12 @@ export function registerTools(server: Server) {
         },
         {
           name: 'set_climate_remote_swing',
-          description: 'Controla la oscilación de aletas (swing vertical y horizontal) del aire acondicionado.',
+          description: 'Controla la oscilación de aletas (swing vertical y horizontal) del aire acondicionado NEX. Escribe swingV y swingH en climate_ac.',
           inputSchema: {
             type: 'object',
             properties: {
-              vertical_swing: { type: 'boolean', description: 'true para activar oscilación vertical.' },
-              horizontal_swing: { type: 'boolean', description: 'true para activar oscilación horizontal.' },
+              vertical_swing: { type: 'boolean', description: 'true para activar oscilación vertical (swingV).' },
+              horizontal_swing: { type: 'boolean', description: 'true para activar oscilación horizontal (swingH).' },
               module_id: { type: 'string', description: 'ID del módulo de cultivo.' },
             },
           },
@@ -203,11 +226,12 @@ export function registerTools(server: Server) {
     };
   });
 
-  // Call Tool Request Handler with Graceful Degradation
+  // ── Call Tool Request Handler ──────────────────────────────────
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
 
     try {
+      // ─── get_live_telemetry ───────────────────────────────────
       if (name === 'get_live_telemetry') {
         const { module_id } = GetLiveTelemetrySchema.parse(args);
         const moduleData = await getModuleData(module_id);
@@ -219,15 +243,17 @@ export function registerTools(server: Server) {
           moduleId: module_id,
           moduleName: moduleData.name,
           stage: moduleData.stage,
+          status: moduleData.status,
           telemetry: {
-            ph: { value: readings.ph, target: setpoints.phTarget, status: Math.abs(readings.ph - setpoints.phTarget) < 0.3 ? 'OK' : 'AJUSTANDO' },
-            ec: { value: readings.ec, unit: 'mS/cm', target: setpoints.ecTarget, status: Math.abs(readings.ec - setpoints.ecTarget) < 0.2 ? 'OK' : 'AJUSTANDO' },
-            waterTemp: { value: readings.waterTemp, unit: '°C', target: setpoints.waterTempTarget, status: 'OK' },
-            airTemp: { value: readings.airTemp, unit: '°C', target: setpoints.airTempTarget, status: 'OK' },
-            airHumidity: { value: readings.airHumidity, unit: '%', target: setpoints.airHumidityTarget, status: 'OK' },
-            vpd: { value: readings.vpd, unit: 'kPa', target: setpoints.vpdTarget, status: 'OPTIMO' },
-            co2: { value: readings.co2, unit: 'PPM', status: 'NORMAL' },
-            waterLevel: { value: readings.waterLevel, unit: '%', status: readings.waterLevel > 30 ? 'NORMAL' : 'ALERTA_LOW' },
+            ph: { value: readings.ph, target: setpoints.phTarget, tolerance: setpoints.phTolerance },
+            ec: { value: readings.ec, unit: 'mS/cm', target: setpoints.ecTarget, tolerance: setpoints.ecTolerance },
+            waterTemp: { value: readings.waterTemp, unit: '°C', target: setpoints.waterTempTarget, tolerance: setpoints.waterTempTolerance },
+            airTemp: { value: readings.airTemp, unit: '°C', target: setpoints.airTempTarget },
+            airHumidity: { value: readings.airHumidity, unit: '%', target: setpoints.airHumidityTarget },
+            vpd: { value: readings.vpd, unit: 'kPa', target: setpoints.vpdTarget },
+            co2: { value: readings.co2, unit: 'PPM' },
+            dissolvedOxygen: { value: readings.dissolvedOxygen, unit: 'mg/L', target: setpoints.dissolvedOxygenTarget },
+            waterLevel: { value: readings.waterLevel, unit: '%', target: setpoints.waterLevelTarget, ok: readings.waterLevelOk },
           },
           timestamp: new Date().toISOString(),
         };
@@ -235,12 +261,20 @@ export function registerTools(server: Server) {
         return { content: [{ type: 'text', text: JSON.stringify(responsePayload, null, 2) }] };
       }
 
+      // ─── get_historical_telemetry ─────────────────────────────
       if (name === 'get_historical_telemetry') {
         const { metric, timeframe, module_id } = GetHistoricalTelemetrySchema.parse(args);
         const moduleData = await getModuleData(module_id);
-        const currentVal = moduleData.currentReadings[metric] || 1.5;
 
-        // Generate clean historical series data
+        // Map metric name → currentReadings key
+        const metricKeyMap: Record<string, string> = {
+          ph: 'ph', ec: 'ec', vpd: 'vpd', temp_agua: 'waterTemp',
+          oxigeno: 'dissolvedOxygen', co2: 'co2', temp_aire: 'airTemp', humedad: 'airHumidity',
+        };
+        const readingsKey = metricKeyMap[metric] || metric;
+        const currentVal = moduleData.currentReadings[readingsKey] || 1.5;
+
+        // Generate historical series data based on current value
         const pointsCount = timeframe === '1h' ? 6 : timeframe === '24h' ? 24 : 14;
         const timeSeries = Array.from({ length: pointsCount }, (_, i) => {
           const variation = (Math.random() - 0.5) * 0.2;
@@ -269,65 +303,88 @@ export function registerTools(server: Server) {
         return { content: [{ type: 'text', text: JSON.stringify(responsePayload, null, 2) }] };
       }
 
+      // ─── get_phenological_status ──────────────────────────────
       if (name === 'get_phenological_status') {
         const { module_id } = GetPhenologicalStatusSchema.parse(args);
         const moduleData = await getModuleData(module_id);
-        const phenology = moduleData.phenology || {};
+        const strategy = moduleData.strategyPlan || {};
+        const readings = moduleData.currentReadings || {};
+        const activeStep = strategy.steps?.[strategy.activeWeekIndex || 0];
 
         const responsePayload = {
           success: true,
           moduleId: module_id,
           moduleName: moduleData.name,
           stage: moduleData.stage,
-          strategy: moduleData.strategy,
-          healthIndex: phenology.healthIndex || '98% Excelente',
-          lastESP32Snapshot: {
-            url: phenology.lastSnapshotUrl || 'https://cultivaria-9673f.web.app/snapshots/latest.jpg',
-            timestamp: new Date(phenology.lastSnapshotTimestamp || Date.now()).toISOString(),
+          status: moduleData.status,
+          strategyPlan: {
+            strainName: strategy.strainName || 'No configurada',
+            totalWeeks: strategy.totalWeeks || 0,
+            activeWeekIndex: strategy.activeWeekIndex || 0,
+            isActive: strategy.isActive || false,
+            currentWeek: activeStep ? {
+              weekNumber: activeStep.weekNumber,
+              weekTitle: activeStep.weekTitle,
+              stage: activeStep.stage,
+              targets: {
+                phTarget: activeStep.phTarget,
+                ecTarget: activeStep.ecTarget,
+                waterTempTarget: activeStep.waterTempTarget,
+                airTempTarget: activeStep.airTempTarget,
+                airHumidityTarget: activeStep.airHumidityTarget,
+                vpdTarget: activeStep.vpdTarget,
+                co2Target: activeStep.co2Target,
+                lightIntensityPercent: activeStep.lightIntensityPercent,
+              },
+              observations: activeStep.observationsNotes,
+            } : null,
           },
-          recentAIDiagnosis: phenology.lastAIDiagnosis || 'Masa foliar vigorosa con clorofila óptima.',
-        };
-
-        return { content: [{ type: 'text', text: JSON.stringify(responsePayload, null, 2) }] };
-      }
-
-      if (name === 'update_setpoint') {
-        const { metric, target_value, module_id } = UpdateSetpointSchema.parse(args);
-        
-        // Map metric key
-        const setpointKeyMap: Record<string, string> = {
-          ec: 'ecTarget',
-          temp_agua: 'waterTempTarget',
-          temp_aire: 'airTempTarget',
-          humedad_aire: 'airHumidityTarget',
-          vpd: 'vpdTarget',
-          ph: 'phTarget',
-        };
-        const rtdbKey = setpointKeyMap[metric] || metric;
-
-        const updateRes = await updateModuleData('setpoints', { [rtdbKey]: target_value }, module_id);
-
-        const responsePayload = {
-          success: updateRes.success,
-          message: `Setpoint de ${metric} actualizado con éxito a ${target_value}.`,
-          moduleId: module_id,
-          metric,
-          newTargetValue: target_value,
-          rtdbUpdated: !updateRes.fallbackUsed,
+          currentConditions: {
+            airTemp: readings.airTemp,
+            airHumidity: readings.airHumidity,
+            vpd: readings.vpd,
+            co2: readings.co2,
+            ph: readings.ph,
+            ec: readings.ec,
+            waterTemp: readings.waterTemp,
+          },
           timestamp: new Date().toISOString(),
         };
 
         return { content: [{ type: 'text', text: JSON.stringify(responsePayload, null, 2) }] };
       }
 
+      // ─── update_setpoint ──────────────────────────────────────
+      if (name === 'update_setpoint') {
+        const { metric, target_value, module_id } = UpdateSetpointSchema.parse(args);
+        const rtdbKey = setpointKeyMap[metric] || metric;
+
+        const updateRes = await updateModuleData('setpoints', { [rtdbKey]: target_value }, module_id);
+
+        const responsePayload = {
+          success: updateRes.success,
+          message: `Setpoint de ${metric} actualizado a ${target_value}.`,
+          moduleId: module_id,
+          metric,
+          firebaseKey: rtdbKey,
+          newTargetValue: target_value,
+          firebasePersisted: !updateRes.fallbackUsed,
+          timestamp: new Date().toISOString(),
+        };
+
+        return { content: [{ type: 'text', text: JSON.stringify(responsePayload, null, 2) }] };
+      }
+
+      // ─── trigger_irrigation ───────────────────────────────────
+      // Writes to actuators/solenoidFillState — the ESP-01 polls this every 1s
       if (name === 'trigger_irrigation') {
         const { action, duration_minutes, module_id } = TriggerIrrigationSchema.parse(args);
-        const statusText = action === 'start' ? 'ABIERTA' : 'CERRADA';
+        const solenoidState = action === 'start' ? 'OPEN' : 'CLOSED';
+        const timerEnd = action === 'start' ? Date.now() + (duration_minutes * 60000) : 0;
 
-        const updateRes = await updateModuleData('commands/irrigation', {
-          status: statusText,
-          durationMinutes: action === 'start' ? duration_minutes : 0,
-          updatedAt: Date.now(),
+        const updateRes = await updateModuleData('actuators', {
+          solenoidFillState: solenoidState,
+          solenoidTimerEndTime: timerEnd,
         }, module_id);
 
         const responsePayload = {
@@ -336,68 +393,93 @@ export function registerTools(server: Server) {
             ? `Electroválvula de riego ABIERTA por ${duration_minutes} minutos.`
             : 'Electroválvula de riego CERRADA.',
           moduleId: module_id,
-          valveState: statusText,
+          solenoidFillState: solenoidState,
           durationMinutes: action === 'start' ? duration_minutes : 0,
+          firebasePath: `kits/${module_id}/actuators/solenoidFillState`,
+          firebasePersisted: !updateRes.fallbackUsed,
           timestamp: new Date().toISOString(),
         };
 
         return { content: [{ type: 'text', text: JSON.stringify(responsePayload, null, 2) }] };
       }
 
+      // ─── set_actuator_mode ────────────────────────────────────
+      // Writes to actuators/{deviceKey} using real Firebase key names
       if (name === 'set_actuator_mode') {
         const { device, mode, on_minutes, off_minutes, module_id } = SetActuatorModeSchema.parse(args);
+        const firebaseKey = deviceKeyMap[device];
 
-        const patchPayload: Record<string, any> = { [device]: mode };
-        if (on_minutes !== undefined) patchPayload[`${device}_on_min`] = on_minutes;
-        if (off_minutes !== undefined) patchPayload[`${device}_off_min`] = off_minutes;
+        if (!firebaseKey) {
+          throw new Error(`Dispositivo no reconocido: ${device}. Válidos: extractor, ventilacion, chiller.`);
+        }
+
+        const patchPayload: Record<string, any> = { [firebaseKey]: mode };
+        // AUTO_CYCLE specific params (only for ventilationState)
+        if (mode === 'AUTO_CYCLE' && device === 'ventilacion') {
+          if (on_minutes !== undefined) patchPayload['ventilationOnMinutes'] = on_minutes;
+          if (off_minutes !== undefined) patchPayload['ventilationOffMinutes'] = off_minutes;
+        }
 
         const updateRes = await updateModuleData('actuators', patchPayload, module_id);
 
         const responsePayload = {
           success: updateRes.success,
-          message: `Modo de ${device} actualizado a ${mode}.`,
+          message: `${device} (${firebaseKey}) actualizado a modo ${mode}.`,
           moduleId: module_id,
           device,
+          firebaseKey,
           newMode: mode,
           cycleConfig: mode === 'AUTO_CYCLE' ? { onMinutes: on_minutes, offMinutes: off_minutes } : undefined,
+          firebasePersisted: !updateRes.fallbackUsed,
           timestamp: new Date().toISOString(),
         };
 
         return { content: [{ type: 'text', text: JSON.stringify(responsePayload, null, 2) }] };
       }
 
+      // ─── update_strategy ──────────────────────────────────────
+      // Writes to strategyPlan (not "strategy")
       if (name === 'update_strategy') {
         const { strain_name, cycle_week, module_id } = UpdateStrategySchema.parse(args);
 
-        const updateRes = await updateModuleData('strategy', {
+        const updateRes = await updateModuleData('strategyPlan', {
           strainName: strain_name,
-          cycleWeek: cycle_week,
           updatedAt: Date.now(),
         }, module_id);
 
         const responsePayload = {
           success: updateRes.success,
-          message: `Estrategia de cultivo actualizada a ${strain_name} (${cycle_week}).`,
+          message: `Estrategia de cultivo actualizada: ${strain_name} (${cycle_week}).`,
           moduleId: module_id,
           strainName: strain_name,
           cycleWeek: cycle_week,
+          firebasePath: `kits/${module_id}/strategyPlan`,
+          firebasePersisted: !updateRes.fallbackUsed,
           timestamp: new Date().toISOString(),
         };
 
         return { content: [{ type: 'text', text: JSON.stringify(responsePayload, null, 2) }] };
       }
 
+      // ─── set_climate_remote_power ─────────────────────────────
+      // Writes to climate_ac — the WeMos D1 R32 reads this every 1.5s to emit IR
       if (name === 'set_climate_remote_power') {
-        const { power, temp, mode, turbo, eco, module_id } = SetClimateRemotePowerSchema.parse(args);
+        const { power, temp, mode, fan, turbo, eco, module_id } = SetClimateRemotePowerSchema.parse(args);
 
-        const updateRes = await updateModuleData('virtual_ac', {
+        const patchData: Record<string, any> = {
           power,
           temp,
           mode,
           turbo,
           eco,
           updatedAt: Date.now(),
-        }, module_id);
+        };
+        // Only include fan if explicitly provided
+        if (fan !== undefined) {
+          patchData.fan = fan;
+        }
+
+        const updateRes = await updateModuleData('climate_ac', patchData, module_id);
 
         const responsePayload = {
           success: updateRes.success,
@@ -408,29 +490,36 @@ export function registerTools(server: Server) {
           powerState: power,
           temperatureTarget: temp,
           operatingMode: mode,
+          fanSpeed: fan,
           turboMode: turbo,
           ecoMode: eco,
+          firebasePath: `kits/${module_id}/climate_ac`,
+          firebasePersisted: !updateRes.fallbackUsed,
           timestamp: new Date().toISOString(),
         };
 
         return { content: [{ type: 'text', text: JSON.stringify(responsePayload, null, 2) }] };
       }
 
+      // ─── set_climate_remote_swing ─────────────────────────────
+      // Writes swingV / swingH to climate_ac (not verticalSwing/horizontalSwing)
       if (name === 'set_climate_remote_swing') {
         const { vertical_swing, horizontal_swing, module_id } = SetClimateRemoteSwingSchema.parse(args);
 
         const patchData: Record<string, any> = { updatedAt: Date.now() };
-        if (vertical_swing !== undefined) patchData.verticalSwing = vertical_swing;
-        if (horizontal_swing !== undefined) patchData.horizontalSwing = horizontal_swing;
+        if (vertical_swing !== undefined) patchData.swingV = vertical_swing;
+        if (horizontal_swing !== undefined) patchData.swingH = horizontal_swing;
 
-        const updateRes = await updateModuleData('virtual_ac', patchData, module_id);
+        const updateRes = await updateModuleData('climate_ac', patchData, module_id);
 
         const responsePayload = {
           success: updateRes.success,
-          message: 'Oscilación de aire acondicionado actualizada con éxito.',
+          message: 'Oscilación del aire acondicionado actualizada.',
           moduleId: module_id,
-          verticalSwing: vertical_swing,
-          horizontalSwing: horizontal_swing,
+          swingV: vertical_swing,
+          swingH: horizontal_swing,
+          firebasePath: `kits/${module_id}/climate_ac`,
+          firebasePersisted: !updateRes.fallbackUsed,
           timestamp: new Date().toISOString(),
         };
 
